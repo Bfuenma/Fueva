@@ -804,29 +804,75 @@ async function generateInsights() {
   const dailySeed = new Date().toISOString().split('T')[0].replace(/-/g,'');
   const prompt = `You are Fueva's market intelligence AI. Today: ${ds}. Day of week: ${new Date().toLocaleDateString('en-US',{weekday:'long'})}. Daily seed: ${dailySeed} — use this seed to ensure consistency: generate the same insights if called multiple times today.
 
-CRITICAL: Return ONLY a single valid JSON object. No markdown. No extra text. Start with { and end with }.
+CRITICAL: Return ONLY a single valid JSON object. No markdown, no backticks, no explanation. Just the raw JSON.
 
-Generate THREE sets:
-- "daily": 6 insights (1 each: Stocks, Crypto, Tokens, Meme Coins, NFTs, Web3). SHORT-TERM day trading windows 4-24 hours. Fresh every morning.
-- "swing": 3 swing trade setups (Stocks, Crypto, Tokens). 5-14 day windows. These are medium-term setups for patient traders.
-- "flash": 2 urgent insights for moves within 4-12 hours only when there is a real catalyst
+Required structure:
+{
+  "insights": [array of 6 daily insight objects],
+  "flash": [array of 2-3 flash insight objects],
+  "swing": [array of 2-3 swing setup objects],
+  "marketContext": "One sentence macro summary of today's market environment",
+  "weeklyPick": "ticker of highest conviction insight this week"
+}
 
-RULES:
-- Use REAL tickers, REAL price levels, REAL catalysts
-- Keep ALL text fields SHORT (max 1-2 sentences each)
-- fact_pct + speculation_pct must equal 100
+Each insight object must have ALL these fields:
+{
+  "id": "f_[TICKER]_${dailySeed}",
+  "ticker": "TICKER",
+  "name": "Full Asset Name",
+  "category": "stocks|crypto|tokens|meme|nft|web3",
+  "action": "BULLISH|BEARISH|WATCH",
+  "risk": "Low|Medium|High",
+  "fueva_score": [number 50-95],
+  "target": "$XX or XX%",
+  "entry": "Specific entry thesis in 1-2 sentences",
+  "knowledgeable": "Deeper analysis with context, catalysts, and reasoning in 3-4 sentences",
+  "signals": ["Specific signal 1", "Specific signal 2", "Specific signal 3"],
+  "sources": ["Source publication 1", "Source publication 2"],
+  "fact_pct": [number, % of insight that is verified fact],
+  "inference_pct": [number, % that is reasoned inference, fact+inference=100],
+  "expires": "${new Date(Date.now()+24*60*60*1000).toISOString()}",
+  "market": "US|Global|Crypto|DeFi"
+}
 
-JSON structure (copy exactly, fill in values):
-{"market_context":"One sentence macro context for today — Fed, earnings, macro events driving markets.","daily":[{"ticker":"NVDA","name":"NVIDIA Corp","category":"Stocks","action":"BUY","target":"$145","risk":"Medium","risk_reason":"One sentence why.","fact_pct":70,"speculation_pct":30,"fueva_score":78,"confidence":"High","region":"North America","action_window_days":7,"entry_explanation":"One sentence plain English analogy.","knowledgeable_explanation":"One sentence with a technical fact.","experienced_explanation":"One sentence with catalyst and levels.","signals":["Signal 1","Signal 2","Signal 3"],"sources":[{"label":"Reuters","url":"https://reuters.com"}],"is_contrarian":false,"vs_consensus":"One sentence."}],"flash":[{"ticker":"BTC","name":"Bitcoin","category":"Crypto","action":"BUY","target":"$72000","risk":"High","risk_reason":"One sentence why.","fact_pct":60,"speculation_pct":40,"fueva_score":82,"window_hours":6,"entry_explanation":"One urgent sentence.","knowledgeable_explanation":"One technical sentence.","experienced_explanation":"Entry, stop, target in one sentence.","signals":["Signal 1","Signal 2","Signal 3"],"sources":[{"label":"CoinDesk","url":"https://coindesk.com"}],"urgency":"HIGH"}]}`;
+INSIGHTS (6 total — one per market):
+1. Stocks — a US-listed stock with a clear catalyst today
+2. Crypto — BTC, ETH, SOL, or major altcoin
+3. Tokens — a DeFi or utility token with on-chain activity
+4. Meme Coins — DOGE, SHIB, PEPE or trending meme coin
+5. NFTs — a specific NFT collection or NFT-related stock
+6. Web3 — infrastructure, L2, or Web3 platform play
 
-  const res = await fetch('/.netlify/functions/generate', {
+FLASH (2 objects) — urgent 4-12 hour signals. Set expires to ${new Date(Date.now()+12*60*60*1000).toISOString()}
+
+SWING (2 objects) — 5-14 day setups. Set expires to ${new Date(Date.now()+14*24*60*60*1000).toISOString()}
+
+Use real tickers and real market knowledge. Be specific about catalysts, price levels, and reasoning. Higher fueva_score = higher conviction. Scores should range from 55-92.`;
+
+  // Fetch live market data first
+  let liveData = '';
+  try {
+    const [cgRes, fgRes] = await Promise.all([
+      fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin,ethereum,solana,binancecoin,dogecoin&order=market_cap_desc&per_page=5&price_change_percentage=24h').then(r=>r.json()).catch(()=>null),
+      fetch('https://api.alternative.me/fng/?limit=1').then(r=>r.json()).catch(()=>null)
+    ]);
+    if (Array.isArray(cgRes)) {
+      liveData += 'LIVE CRYPTO: ' + cgRes.map(c=>c.symbol?.toUpperCase()+' $'+c.current_price?.toLocaleString()+'('+( c.price_change_percentage_24h>=0?'+':'')+c.price_change_percentage_24h?.toFixed(1)+'%)').join(' | ') + '\n';
+    }
+    if (fgRes?.data?.[0]) liveData += 'FEAR/GREED: '+fgRes.data[0].value+'/100 '+fgRes.data[0].value_classification+'\n';
+  } catch(e) {}
+
+  const enrichedPrompt = liveData ? liveData + '\n' + prompt : prompt;
+
+  const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 5000,
-      messages: [{ role: 'user', content: prompt }]
+      messages: [{ role: 'user', content: enrichedPrompt }]
     })
+
   });
 
   if (!res.ok) {
@@ -3826,7 +3872,7 @@ function goToLoginAfterPlan() {
       + '<p style="font-size:12px;color:#888">This takes a few seconds.</p>'
       + '</div>';
   }
-  fetch('/.netlify/functions/activate', {
+  fetch('/api/activate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: email })
